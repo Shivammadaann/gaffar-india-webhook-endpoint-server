@@ -59,7 +59,7 @@ WEBHOOK_SECRET_SHIPROCKET=your_shiprocket_webhook_secret
 WEBHOOK_SECRET_WOOCOMMERCE=your_woocommerce_webhook_secret
 ```
 
-For WATI and Shiprocket, pass the secret as `?secret=...`, `?webhook_secret=...`, `X-Webhook-Secret`, or `Authorization: Bearer ...`.
+For WATI and Shiprocket, pass the secret as `?secret=...`, `?webhook_secret=...`, `X-Webhook-Secret`, `X-API-Key`, or `Authorization: Bearer ...`.
 
 For WooCommerce, set the same value as the webhook secret in WooCommerce. The server validates the `X-WC-Webhook-Signature` HMAC header when it is present.
 
@@ -85,7 +85,7 @@ https://api.gaffarindia.in/webhooks/{source}
 
 Examples:
 - `https://api.gaffarindia.in/webhooks/woocommerce`
-- `https://api.gaffarindia.in/webhooks/shiprocket`
+- `https://api.gaffarindia.in/webhooks/shipping`
 - `https://api.gaffarindia.in/webhooks/meta`
 - `https://api.gaffarindia.in/webhooks/wati`
 

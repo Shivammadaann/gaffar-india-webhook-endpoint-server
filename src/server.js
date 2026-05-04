@@ -205,6 +205,7 @@ function getPresentedWebhookSecret(req) {
 
   return (
     req.headers['x-webhook-secret'] ||
+    req.headers['x-api-key'] ||
     req.headers['x-wati-secret'] ||
     req.headers['x-shiprocket-secret'] ||
     req.query.webhook_secret ||
