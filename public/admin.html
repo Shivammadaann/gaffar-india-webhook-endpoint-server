@@ -33,23 +33,7 @@
   <div class="container">
     <div class="card">
       <h2>Live events</h2>
-      <p>Incoming events are displayed in real time.</p>
-      <div class="row">
-        <div>
-          <label for="forwardUrl">Forward URL</label>
-          <input id="forwardUrl" placeholder="https://example.com/receive" />
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button id="saveForward">Save forwarding URL</button>
-        </div>
-      </div>
-      <div class="row" style="margin-top: 12px;">
-        <div style="flex: 1 1 100%;">
-          <label for="adminSecret">Admin Secret</label>
-          <input id="adminSecret" placeholder="X-Admin-Secret header value" />
-        </div>
-      </div>
+      <p>Incoming events are displayed in real time from all sources.</p>
       <div id="statusMessage" style="margin-top: 16px;"></div>
     </div>
 
@@ -67,8 +51,8 @@
           <tr>
             <th>Time</th>
             <th>Source</th>
-            <th>Event</th>
-            <th>Forward</th>
+            <th>IP</th>
+            <th>Event Type</th>
           </tr>
         </thead>
         <tbody id="eventsTable"></tbody>
@@ -117,15 +101,15 @@
     function renderEvent(event) {
       const tr = document.createElement('tr');
       const timestamp = new Date(event.receivedAt).toLocaleString();
-      const source = event.sourceIp || 'unknown';
+      const source = event.source || 'unknown';
+      const sourceIp = event.sourceIp || '';
       const eventType = event.headers['x-wati-event'] || (typeof event.body === 'object' ? 'JSON' : 'Raw');
-      const status = event.forwarded ? 'success' : 'pending';
 
       tr.innerHTML = `
         <td>${timestamp}</td>
         <td>${source}</td>
+        <td>${sourceIp}</td>
         <td>${eventType}</td>
-        <td><span class="badge ${status}">${event.forwarded ? 'Forwarded' : 'Pending'}</span></td>
       `;
       tr.addEventListener('click', () => {
         selectedDetails.textContent = JSON.stringify(event, null, 2);
@@ -136,7 +120,7 @@
     async function loadConfig() {
       const response = await fetch('/api/config');
       const config = await response.json();
-      forwardUrlInput.value = config.forwardUrl || '';
+      // No forward URL to load
     }
 
     async function loadEvents() {
@@ -148,23 +132,6 @@
         selectedDetails.textContent = JSON.stringify(json.events[0], null, 2);
       }
     }
-
-    async function saveForwardUrl() {
-      const url = forwardUrlInput.value.trim();
-      const response = await fetch('/api/forward', {
-        method: 'POST',
-        headers: getAdminHeaders(),
-        body: JSON.stringify({ forwardUrl: url }),
-      });
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        displayMessage(errorBody.error || 'Unable to save forward URL', true);
-        return;
-      }
-      displayMessage('Forward URL saved successfully.');
-    }
-
-    saveButton.addEventListener('click', saveForwardUrl);
 
     async function initialize() {
       await loadConfig();

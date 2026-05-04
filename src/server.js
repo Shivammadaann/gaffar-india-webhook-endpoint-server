@@ -9,7 +9,6 @@ const { loadEvents, saveEvents } = require('./events-store');
 require('dotenv').config();
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-const FORWARD_URL = process.env.FORWARD_URL || '';
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 const EVENTS_MAX = parseInt(process.env.EVENTS_MAX, 10) || 500;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'dev';
@@ -17,7 +16,6 @@ const WATI_API_ENDPOINT = (process.env.WATI_API_ENDPOINT || 'https://api.wati.io
 const WATI_API_TOKEN = process.env.WATI_API_TOKEN || '';
 
 const app = express();
-let forwardUrl = FORWARD_URL;
 const eventHistory = loadEvents(EVENTS_MAX);
 const sseClients = new Set();
 
@@ -56,9 +54,9 @@ async function sendForward(targetUrl, event) {
       method: 'POST',
       headers: {
         'Content-Type': event.contentType || 'application/json',
-        'X-Wati-Webhooks-Relay': 'wati-incoming-webhook',
-        'X-Original-Event-Id': event.id,
-        'X-Original-Event-Time': event.receivedAt,
+        'X-Webhook-Source': event.source,
+        'X-Event-Id': event.id,
+        'X-Event-Time': event.receivedAt,
       },
       body: payload,
     });
@@ -104,8 +102,9 @@ function isAdminAuthorized(req) {
   return token === ADMIN_SECRET;
 }
 
-app.post('/webhook', async (req, res) => {
+app.post('/webhooks/:source', async (req, res) => {
   const receivedAt = new Date().toISOString();
+  const source = req.params.source;
   const sourceIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
   const contentType = req.headers['content-type'] || '';
   let body = req.body;
@@ -121,6 +120,7 @@ app.post('/webhook', async (req, res) => {
   const event = {
     id: makeId(),
     receivedAt,
+    source,
     sourceIp,
     contentType,
     headers: {
@@ -130,21 +130,11 @@ app.post('/webhook', async (req, res) => {
     },
     body,
     rawBody: req.rawBody,
-    forwarded: false,
-    forwardResponse: null,
   };
 
   addEvent(event);
 
-  if (forwardUrl) {
-    const result = await sendForward(forwardUrl, event);
-    event.forwarded = result.forwarded;
-    event.forwardResponse = result.forwardResponse;
-    saveEvents(eventHistory);
-    publishEvent(event);
-  }
-
-  res.json({ success: true, eventId: event.id, forwarded: event.forwarded });
+  res.json({ success: true, eventId: event.id, source });
 });
 
 app.get('/api/events', (req, res) => {
@@ -155,24 +145,9 @@ app.get('/api/events', (req, res) => {
 
 app.get('/api/config', (req, res) => {
   res.json({
-    forwardUrl,
     hasAdminSecret: Boolean(ADMIN_SECRET),
     eventsMax: EVENTS_MAX,
   });
-});
-
-app.post('/api/forward', (req, res) => {
-  if (!isAdminAuthorized(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const url = req.body.forwardUrl;
-  if (typeof url !== 'string') {
-    return res.status(400).json({ error: 'forwardUrl is required' });
-  }
-
-  forwardUrl = url.trim();
-  res.json({ forwardUrl });
 });
 
 app.post('/api/wati/register', async (req, res) => {
@@ -246,10 +221,8 @@ app.use((req, res) => {
 
 async function start() {
   app.listen(PORT, () => {
-    console.log(`WATI webhook relay running on port ${PORT}`);
-    if (forwardUrl) {
-      console.log(`Forwarding incoming events to: ${forwardUrl}`);
-    }
+    console.log(`Webhook relay running on port ${PORT}`);
+    console.log(`Accepting webhooks at /webhooks/{source}`);
   });
 }
 

@@ -1,13 +1,12 @@
-# WATI Incoming Webhook Relay
+# Webhook Relay
 
-A lightweight Express webhook relay server for WATI that captures all incoming events, forwards them to a configurable target URL, and provides a live admin dashboard at `/admin`.
+A lightweight Express webhook relay server that captures events from multiple sources and provides a live admin dashboard at `/admin`.
 
 ## Features
 
-- `POST /webhook` accepts all WATI events
+- `POST /webhooks/{source}` accepts events from any source (e.g., `/webhooks/woocommerce`, `/webhooks/meta`)
 - Stores recent event history in memory and local persistence file `events.json`
-- Optionally forwards events to `FORWARD_URL`
-- `/admin` dashboard shows incoming events live
+- `/admin` dashboard shows incoming events live from all sources
 - `/events/stream` provides server-sent events for live updates
 
 ## Setup
@@ -24,30 +23,33 @@ npm install
 cp .env.example .env
 ```
 
-3. Set `FORWARD_URL` to the URL where you want events forwarded.
-   - If you want the relay to receive WATI events and also forward them on to a downstream service, set this to that downstream URL.
-   - If you only want this app to receive and store events, leave `FORWARD_URL` blank.
+3. Set `ADMIN_SECRET` to a strong secret for admin operations.
 
-4. Add WATI registration settings:
-
-```text
-WATI_API_ENDPOINT=https://api.wati.io
-WATI_API_TOKEN=your_wati_api_token_here
-```
-
-**Required WATI API scopes:**
-- `webhooks:create` (if you want to register webhooks via API)
-
-5. Set `ADMIN_SECRET` to a strong secret for admin operations.
-   - Enter the same value into the `Admin Secret` field in `/admin` before saving the forward URL or registering WATI webhook endpoints.
-
-6. Start the server:
+4. Start the server:
 
 ```bash
 npm start
 ```
 
-7. Open the admin UI:
+5. Open the admin UI:
+
+```text
+http://localhost:3000/admin
+```
+
+## Webhook URLs
+
+Configure your webhook sources to post to:
+
+```
+https://api.gaffarindia.in/webhooks/{source}
+```
+
+Examples:
+- `https://api.gaffarindia.in/webhooks/woocommerce`
+- `https://api.gaffarindia.in/webhooks/shiprocket`
+- `https://api.gaffarindia.in/webhooks/meta`
+- `https://api.gaffarindia.in/webhooks/wati`
 
 ```text
 http://localhost:3000/admin
@@ -57,13 +59,13 @@ http://localhost:3000/admin
 
 The admin UI shows incoming events live. Webhook configuration is managed in WATI's dashboard.
 
-- Configure webhooks in WATI's UI with your relay URL: `https://watiwebhooks.gaffarindia.in/webhook`
+- Configure webhooks in WATI's UI with your relay URL: `https://api.gaffarindia.in/webhooks/wati`
 - The admin panel displays received events in real-time
 
 ## Deployment
 
-- Expose the app to the internet as `watiwebhooks.gaffarindia.in`
-- Route `POST /webhook` from WATI to `https://watiwebhooks.gaffarindia.in/webhook`
+- Expose the app to the internet as `api.gaffarindia.in`
+- Configure webhook sources to post to `https://api.gaffarindia.in/webhooks/{source}`
 - Use a reverse proxy or cloud host with TLS
 
 ## Render deployment
@@ -76,11 +78,8 @@ This repo includes a `render.yaml` file so Render can deploy it as a Node web se
    - Build command: `npm install`
    - Start command: `npm start`
 3. Add the following environment variables in Render:
-   - `WATI_API_ENDPOINT=https://api.wati.io`
-   - `WATI_API_TOKEN` (your WATI bearer token)
    - `ADMIN_SECRET` (a strong admin secret)
-   - `FORWARD_URL` (optional downstream forward target, leave blank if you only want to receive and store events)
-4. If you want WATI to post events to this app, register `https://watiwebhooks.gaffarindia.in/webhook` in the WATI dashboard.
+4. If you want WATI to post events to this app, register `https://api.gaffarindia.in/webhooks/wati` in the WATI dashboard.
 
 ## Notes
 
