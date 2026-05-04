@@ -50,13 +50,13 @@ npm start
 http://localhost:3000/admin
 ```
 
-## WATI webhook registration
+## WATI webhook status
 
-The admin UI can register webhook endpoints directly in WATI using the official API.
+The admin UI displays the current webhook endpoints configured in WATI.
 
 - Configure `WATI_API_ENDPOINT` and `WATI_API_TOKEN`.
-- Open `/admin` and submit a phone number, webhook URL, and event types.
-- The server forwards the registration request to `POST /api/v2/webhookEndpoints`.
+- Open `/admin` and enter the admin secret to view webhook status.
+- The table shows phone numbers, status, subscribed event types, and destination URLs.
 
 ## Deployment
 

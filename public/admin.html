@@ -54,33 +54,10 @@
     </div>
 
     <div class="card">
-      <h2>Register WATI webhook endpoint</h2>
-      <div class="row">
-        <div>
-          <label for="phoneNumber">Phone number</label>
-          <input id="phoneNumber" placeholder="1650-937-9611" />
-        </div>
-        <div>
-          <label for="status">Status</label>
-          <select id="status">
-            <option value="0">0 - Enabled</option>
-            <option value="1">1 - Disabled</option>
-            <option value="2">2 - Defective</option>
-          </select>
-        </div>
-      </div>
-      <div class="row" style="margin-top: 12px;">
-        <div>
-          <label for="watiUrl">Webhook destination URL</label>
-          <input id="watiUrl" placeholder="https://watiwebhooks.gaffarindia.in/webhook" />
-        </div>
-        <div>
-          <label for="eventTypes">Event types</label>
-          <input id="eventTypes" placeholder="message,newContactMessageReceived" />
-        </div>
-      </div>
-      <div style="margin-top: 12px;">
-        <button id="registerWebhook">Register webhook in WATI</button>
+      <h2>WATI Webhook Status</h2>
+      <p>Configured webhook endpoints from WATI:</p>
+      <div id="watiWebhooksContainer">
+        <p>Loading webhook status...</p>
       </div>
       <div id="watiStatusMessage" style="margin-top: 16px;"></div>
     </div>
@@ -113,11 +90,7 @@
     const saveButton = document.getElementById('saveForward');
     const statusMessage = document.getElementById('statusMessage');
     const adminSecretInput = document.getElementById('adminSecret');
-    const phoneInput = document.getElementById('phoneNumber');
-    const statusInput = document.getElementById('status');
-    const watiUrlInput = document.getElementById('watiUrl');
-    const eventTypesInput = document.getElementById('eventTypes');
-    const registerButton = document.getElementById('registerWebhook');
+    const watiWebhooksContainer = document.getElementById('watiWebhooksContainer');
     const watiStatusMessage = document.getElementById('watiStatusMessage');
 
     function displayMessage(text, isError = false) {
@@ -194,45 +167,59 @@
       displayMessage('Forward URL saved successfully.');
     }
 
-    async function registerWatiWebhook() {
-      const phoneNumber = phoneInput.value.trim();
-      const statusValue = statusInput.value;
-      const url = watiUrlInput.value.trim();
-      const eventTypes = eventTypesInput.value.split(',').map((item) => item.trim()).filter(Boolean);
+    async function loadWatiWebhooks() {
+      try {
+        const response = await fetch('/api/wati/webhooks', {
+          headers: getAdminHeaders(),
+        });
 
-      if (!phoneNumber || !url || eventTypes.length === 0) {
-        displayWatiMessage('Phone number, destination URL, and event types are required.', true);
-        return;
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => ({}));
+          displayWatiMessage(errorBody.error || 'Failed to load WATI webhooks.', true);
+          watiWebhooksContainer.innerHTML = '<p>Unable to load webhook status.</p>';
+          return;
+        }
+
+        const data = await response.json();
+        if (!data.ok || !Array.isArray(data.result)) {
+          displayWatiMessage('Invalid response from WATI API.', true);
+          watiWebhooksContainer.innerHTML = '<p>No webhook data available.</p>';
+          return;
+        }
+
+        const webhooks = data.result;
+        if (webhooks.length === 0) {
+          watiWebhooksContainer.innerHTML = '<p>No webhook endpoints configured in WATI.</p>';
+          displayWatiMessage('No webhooks found.', false);
+          return;
+        }
+
+        let html = '<table><thead><tr><th>Phone Number</th><th>Status</th><th>Event Types</th><th>URL</th></tr></thead><tbody>';
+        webhooks.forEach((webhook) => {
+          const statusText = webhook.status === 0 ? 'Enabled' : webhook.status === 1 ? 'Disabled' : 'Defective';
+          const statusClass = webhook.status === 0 ? 'success' : 'error';
+          html += `<tr>
+            <td>${webhook.channelPhoneNumber || webhook.phoneNumber}</td>
+            <td><span class="badge ${statusClass}">${statusText}</span></td>
+            <td>${webhook.eventTypes.join(', ')}</td>
+            <td>${webhook.url}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        watiWebhooksContainer.innerHTML = html;
+        displayWatiMessage(`Loaded ${webhooks.length} webhook endpoint(s).`, false);
+      } catch (error) {
+        displayWatiMessage('Error loading WATI webhooks: ' + error.message, true);
+        watiWebhooksContainer.innerHTML = '<p>Error loading webhook status.</p>';
       }
-
-      const response = await fetch('/api/wati/register', {
-        method: 'POST',
-        headers: getAdminHeaders(),
-        body: JSON.stringify([
-          {
-            phoneNumber,
-            status: Number(statusValue),
-            url,
-            eventTypes,
-          },
-        ]),
-      });
-
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        displayWatiMessage(body.error || 'Failed to register webhook with WATI.', true);
-        return;
-      }
-
-      displayWatiMessage('WATI webhook endpoint registered successfully.', false);
     }
 
     saveButton.addEventListener('click', saveForwardUrl);
-    registerButton.addEventListener('click', registerWatiWebhook);
 
     async function initialize() {
       await loadConfig();
       await loadEvents();
+      await loadWatiWebhooks();
       const source = new EventSource('/events/stream');
       source.onmessage = (event) => {
         try {
