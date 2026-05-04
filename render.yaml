@@ -9,7 +9,13 @@ services:
     envVars:
       - key: WATI_API_ENDPOINT
         value: https://api.wati.io
+      - key: PUBLIC_BASE_URL
+        value: https://api.gaffarindia.in
+      - key: DEFAULT_COUNTRY_CODE
+        value: "91"
       - key: ADMIN_SECRET
         sync: false
       - key: WATI_API_TOKEN
+        sync: false
+      - key: WATI_CHANNEL_NUMBER
         sync: false

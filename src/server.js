@@ -5,6 +5,8 @@ const cors = require('cors');
 const morgan = require('morgan');
 const fetch = require('cross-fetch');
 const { loadEvents, saveEvents } = require('./events-store');
+const { loadAutomations, resetAutomations, saveAutomations } = require('./automations-store');
+const { runAutomations } = require('./automation-engine');
 
 require('dotenv').config();
 
@@ -22,6 +24,7 @@ const WEBHOOK_FORWARD_TIMEOUT_MS = parseInt(process.env.WEBHOOK_FORWARD_TIMEOUT_
 
 const app = express();
 const eventHistory = loadEvents(EVENTS_MAX);
+let automationConfig = loadAutomations();
 const sseClients = new Set();
 
 function addEvent(event) {
@@ -307,6 +310,203 @@ async function forwardEvent(event, targets) {
   });
 }
 
+async function runEventAutomations(event) {
+  updateEvent(event.id, {
+    automation: {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  const result = await runAutomations(event, automationConfig, {
+    env: process.env,
+    fetch,
+  });
+
+  updateEvent(event.id, {
+    automation: result,
+  });
+}
+
+function getPublicBaseUrl(req) {
+  const configured = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (configured) return configured;
+
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+function getAutomationUrls(req) {
+  const baseUrl = getPublicBaseUrl(req);
+
+  return {
+    woocommerce: `${baseUrl}/automations/woocommerce`,
+    shipping: `${baseUrl}/automations/shipping`,
+    wati: `${baseUrl}/automations/wati`,
+  };
+}
+
+function pickArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+
+  const keys = [
+    'templates',
+    'messageTemplates',
+    'message_templates',
+    'items',
+    'data',
+    'records',
+    'result',
+    'results',
+  ];
+
+  for (const key of keys) {
+    const nested = pickArray(value[key]);
+    if (nested.length > 0) return nested;
+  }
+
+  return [];
+}
+
+function getTemplateStatus(template) {
+  return String(
+    template.status ||
+    template.templateStatus ||
+    template.approvalStatus ||
+    template.approval_status ||
+    template.reviewStatus ||
+    ''
+  ).trim();
+}
+
+function getTemplateName(template) {
+  return String(
+    template.template_name ||
+    template.templateName ||
+    template.name ||
+    template.elementName ||
+    template.element_name ||
+    ''
+  ).trim();
+}
+
+function normalizeTemplate(template) {
+  const name = getTemplateName(template);
+
+  return {
+    name,
+    status: getTemplateStatus(template),
+    category: template.category || template.templateCategory || template.template_category || '',
+    language: template.language || template.languageCode || template.language_code || '',
+    body: template.body || template.bodyText || template.body_text || template.text || '',
+    header: template.header || template.headerText || template.header_text || '',
+    footer: template.footer || template.footerText || template.footer_text || '',
+    buttons: template.buttons || [],
+    parameters: template.parameters || template.customParams || [],
+    raw: template,
+  };
+}
+
+function isApprovedTemplate(template) {
+  const status = getTemplateStatus(template).toLowerCase();
+  return status === 'approved' || status === 'active' || status === 'enabled';
+}
+
+async function fetchWatiTemplates({ approvedOnly = true, pageSize = 100, pageNumber = 1, name = '', channel = '' } = {}) {
+  if (!WATI_API_TOKEN) {
+    return { ok: false, status: 500, error: 'WATI_API_TOKEN is not configured' };
+  }
+
+  const endpoints = [
+    {
+      label: 'v2',
+      url: `${WATI_API_ENDPOINT}/api/v2/getMessageTemplates`,
+      params: {
+        pageSize,
+        pageNumber,
+        name,
+      },
+    },
+    {
+      label: 'ext-v3',
+      url: `${WATI_API_ENDPOINT}/api/ext/v3/messageTemplates`,
+      params: {
+        page_size: pageSize,
+        page_number: pageNumber,
+        channel,
+      },
+    },
+  ];
+  let response;
+  let payload = {};
+  let endpointUsed = '';
+  const errors = [];
+
+  for (const endpoint of endpoints) {
+    const url = new URL(endpoint.url);
+    Object.entries(endpoint.params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        url.searchParams.set(key, String(value));
+      }
+    });
+
+    response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${WATI_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const text = await response.text();
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch (error) {
+      payload = { raw: text };
+    }
+
+    endpointUsed = endpoint.url;
+
+    if (response.ok) {
+      break;
+    }
+
+    errors.push({
+      endpoint: endpoint.url,
+      status: response.status,
+      statusText: response.statusText,
+      details: payload,
+    });
+  }
+
+  if (!response || !response.ok) {
+    return {
+      ok: false,
+      status: response ? response.status : 502,
+      error: 'WATI template fetch failed',
+      attempts: errors,
+    };
+  }
+
+  const templates = pickArray(payload)
+    .map(normalizeTemplate)
+    .filter((template) => template.name)
+    .filter((template) => !approvedOnly || isApprovedTemplate(template));
+
+  return {
+    ok: true,
+    status: response.status,
+    endpoint: endpointUsed,
+    approvedOnly,
+    count: templates.length,
+    templates,
+    rawSummary: {
+      keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+    },
+  };
+}
+
+app.set('trust proxy', true);
 app.use(morgan(LOG_LEVEL));
 app.use(cors());
 app.use(express.static(path.join(__dirname, '../public')));
@@ -321,7 +521,9 @@ function isAdminAuthorized(req) {
   return token === ADMIN_SECRET;
 }
 
-app.post('/webhooks/:source', express.raw({ type: '*/*', limit: BODY_LIMIT }), async (req, res) => {
+const webhookBodyParser = express.raw({ type: '*/*', limit: BODY_LIMIT });
+
+async function handleIncomingWebhook(req, res) {
   const receivedAt = new Date().toISOString();
   const source = normalizeSource(req.params.source);
   const sourceIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
@@ -352,6 +554,9 @@ app.post('/webhooks/:source', express.raw({ type: '*/*', limit: BODY_LIMIT }), a
       status: forwardTargets.length > 0 ? 'pending' : 'disabled',
       targets: forwardTargets,
     },
+    automation: {
+      status: 'pending',
+    },
   };
 
   addEvent(event);
@@ -368,13 +573,27 @@ app.post('/webhooks/:source', express.raw({ type: '*/*', limit: BODY_LIMIT }), a
     });
   }
 
+  runEventAutomations(event).catch((error) => {
+    updateEvent(event.id, {
+      automation: {
+        status: 'failed',
+        completedAt: new Date().toISOString(),
+        results: [{ error: error.message }],
+      },
+    });
+  });
+
   return res.json({
     success: true,
     eventId: event.id,
     source,
     forwardStatus: event.forward.status,
+    automationStatus: event.automation.status,
   });
-});
+}
+
+app.post('/webhooks/:source', webhookBodyParser, handleIncomingWebhook);
+app.post('/automations/:source', webhookBodyParser, handleIncomingWebhook);
 
 app.use(express.json({ limit: BODY_LIMIT, strict: false }));
 app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
@@ -396,7 +615,46 @@ app.get('/api/config', (req, res) => {
     forwardFormat: WEBHOOK_FORWARD_FORMAT,
     hasGlobalForwardTarget: Boolean(WEBHOOK_FORWARD_URL),
     forwardSources: Object.keys(WEBHOOK_FORWARD_MAP),
+    automationUrls: getAutomationUrls(req),
   });
+});
+
+app.post('/api/auth/verify', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  return res.json({ ok: true });
+});
+
+app.get('/api/automations', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return res.json(automationConfig);
+});
+
+app.put('/api/automations', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    automationConfig = saveAutomations(req.body);
+    return res.json(automationConfig);
+  } catch (error) {
+    return res.status(400).json({ error: 'Unable to save automations', details: error.message });
+  }
+});
+
+app.post('/api/automations/reset', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  automationConfig = resetAutomations();
+  return res.json(automationConfig);
 });
 
 app.post('/api/wati/register', async (req, res) => {
@@ -455,6 +713,34 @@ app.post('/api/wati/register', async (req, res) => {
     return res.json(data);
   } catch (error) {
     return res.status(502).json({ error: 'Failed to reach WATI API', details: error.message });
+  }
+});
+
+app.get('/api/wati/templates', async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const approvedOnly = req.query.approvedOnly !== 'false';
+  const pageSize = Math.min(parseInt(req.query.pageSize, 10) || 100, 100);
+  const pageNumber = parseInt(req.query.pageNumber, 10) || 1;
+
+  try {
+    const result = await fetchWatiTemplates({
+      approvedOnly,
+      pageSize,
+      pageNumber,
+      name: req.query.name || '',
+      channel: req.query.channel || '',
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 502).json(result);
+    }
+
+    return res.json(result);
+  } catch (error) {
+    return res.status(502).json({ error: 'Failed to fetch WATI templates', details: error.message });
   }
 });
 

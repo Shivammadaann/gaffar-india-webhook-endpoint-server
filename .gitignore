@@ -1,5 +1,6 @@
 node_modules/
 .env
 events.json
+automations.json
 npm-debug.log
 .DS_Store

@@ -10,6 +10,9 @@ A lightweight Express webhook relay server that captures events from multiple so
 - `/events/stream` provides server-sent events for live updates
 - Optional forwarding to a global URL or source-specific URLs
 - Optional source-specific webhook secrets, including WooCommerce HMAC signature checks
+- Built-in automation URLs at `POST /automations/{source}`
+- Admin-editable automation rules for WATI contact sync, template sends, and custom HTTP posts
+- Approved WATI template fetch in `/admin` using `WATI_API_ENDPOINT` and `WATI_API_TOKEN`
 
 ## Setup
 
@@ -32,10 +35,15 @@ cp .env.example .env
 ```text
 WATI_API_ENDPOINT=https://live-mt-server.wati.io
 WATI_API_TOKEN=your_wati_api_token_here
+WATI_CHANNEL_NUMBER=919999999999
+DEFAULT_COUNTRY_CODE=91
 ```
 
 **Required WATI API scopes:**
 - `webhooks:create` (to register webhooks via API)
+- `contacts:write` (to add/update WATI contacts from WooCommerce orders)
+- `messagetemplate:read` (to fetch approved WATI templates in the admin panel)
+- Template/message sending scope for your WATI account (to send WATI templates)
 
 5. (Optional) Configure forwarding:
 
@@ -55,7 +63,7 @@ By default, forwarded requests use a JSON event envelope with `source`, `headers
 
 ```text
 WEBHOOK_SECRET_WATI=your_wati_webhook_secret
-WEBHOOK_SECRET_SHIPROCKET=your_shiprocket_webhook_secret
+WEBHOOK_SECRET_SHIPPING=your_shiprocket_webhook_secret
 WEBHOOK_SECRET_WOOCOMMERCE=your_woocommerce_webhook_secret
 ```
 
@@ -77,17 +85,42 @@ http://localhost:3000/admin
 
 ## Webhook URLs
 
-Configure your webhook sources to post to:
+Configure your webhook sources to post to either route. Both receive, store, and run automations:
 
 ```
 https://api.gaffarindia.in/webhooks/{source}
+https://api.gaffarindia.in/automations/{source}
 ```
 
 Examples:
-- `https://api.gaffarindia.in/webhooks/woocommerce`
-- `https://api.gaffarindia.in/webhooks/shipping`
-- `https://api.gaffarindia.in/webhooks/meta`
-- `https://api.gaffarindia.in/webhooks/wati`
+- WooCommerce: `https://api.gaffarindia.in/automations/woocommerce`
+- Shiprocket: `https://api.gaffarindia.in/automations/shipping`
+- WATI: `https://api.gaffarindia.in/automations/wati`
+
+## Automations
+
+Open `/admin` and use the Automations section to edit rules. The default rules match this plan:
+
+- WooCommerce `order.created` and `order.updated`: sync customer details into WATI contacts.
+- WooCommerce `order.created`: optional WATI template send for order confirmation.
+- WooCommerce `order.updated`: optional WATI template send for status changes.
+- WooCommerce abandoned cart events: optional WATI template send when an abandoned-cart plugin posts events.
+- WooCommerce product events: captured for inventory workflows.
+- Shiprocket shipping events: optional WATI template send for out-for-delivery.
+- Shiprocket failed delivery/NDR/RTO: optional WATI template send for recovery flows.
+
+Template actions are disabled by default because WATI requires approved template names from your account. Enable a rule action and enter the exact template name in `/admin` after your WATI template is approved.
+
+Use **Approved WATI Templates** in `/admin` to fetch approved templates directly from WATI. The server calls:
+
+```text
+GET {WATI_API_ENDPOINT}/api/v2/getMessageTemplates
+GET {WATI_API_ENDPOINT}/api/ext/v3/messageTemplates
+```
+
+with your configured bearer token, tries v2 first, falls back to ext/v3 when needed, filters approved templates, and never sends the token to the browser.
+
+Automation config is stored in `automations.json`. Keep that file private because it can contain business workflow details.
 
 ## WATI webhook registration
 
