@@ -11,7 +11,7 @@ const { runAutomations } = require('./automation-engine');
 require('dotenv').config();
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+const ADMIN_SECRET = (process.env.ADMIN_SECRET || '').trim();
 const EVENTS_MAX = parseInt(process.env.EVENTS_MAX, 10) || 500;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'dev';
 const WATI_API_ENDPOINT = (process.env.WATI_API_ENDPOINT || 'https://api.wati.io').replace(/\/+$/, '');
@@ -517,8 +517,8 @@ function makeId() {
 
 function isAdminAuthorized(req) {
   if (!ADMIN_SECRET) return true;
-  const token = req.headers['x-admin-secret'] || req.query.secret;
-  return token === ADMIN_SECRET;
+  const token = req.headers['x-admin-secret'] || req.query.secret || (req.body && req.body.secret);
+  return String(token || '').trim() === ADMIN_SECRET;
 }
 
 const webhookBodyParser = express.raw({ type: '*/*', limit: BODY_LIMIT });
@@ -625,6 +625,32 @@ app.post('/api/auth/verify', (req, res) => {
   }
 
   return res.json({ ok: true });
+});
+
+app.get('/api/service-secrets', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return res.json({
+    services: {
+      woocommerce: {
+        label: 'WooCommerce',
+        secret: getWebhookSecret('woocommerce'),
+        envKey: 'WEBHOOK_SECRET_WOOCOMMERCE',
+      },
+      shipping: {
+        label: 'Shiprocket',
+        secret: getWebhookSecret('shipping') || getWebhookSecret('shiprocket'),
+        envKey: getWebhookSecret('shipping') ? 'WEBHOOK_SECRET_SHIPPING' : 'WEBHOOK_SECRET_SHIPROCKET',
+      },
+      wati: {
+        label: 'WATI',
+        secret: getWebhookSecret('wati'),
+        envKey: 'WEBHOOK_SECRET_WATI',
+      },
+    },
+  });
 });
 
 app.get('/api/automations', (req, res) => {
