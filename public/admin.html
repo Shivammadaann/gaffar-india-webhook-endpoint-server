@@ -13,7 +13,7 @@
     .row { display: flex; flex-wrap: wrap; gap: 16px; }
     .row > * { flex: 1 1 240px; }
     label { display: block; margin-bottom: 8px; font-weight: 600; }
-    input, button, textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-size: 0.95rem; }
+    input, button, textarea, select { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-size: 0.95rem; }
     button { background: #2563eb; color: #fff; border: none; cursor: pointer; transition: background .2s ease; }
     button:hover { background: #1d4ed8; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; }
@@ -34,6 +34,15 @@
     <div class="card">
       <h2>Live events</h2>
       <p>Incoming events are displayed in real time from all sources.</p>
+      <div id="adminSecretPanel" class="row" style="display: none; margin-top: 12px;">
+        <div>
+          <label for="adminSecret">Admin secret</label>
+          <input id="adminSecret" type="password" placeholder="Enter ADMIN_SECRET" autocomplete="current-password" />
+        </div>
+        <div style="align-self: end;">
+          <button id="applyAdminSecret">Apply secret and reload</button>
+        </div>
+      </div>
       <div id="statusMessage" style="margin-top: 16px;"></div>
     </div>
 
@@ -41,6 +50,38 @@
       <h2>WATI Webhook Status</h2>
       <p>Webhook endpoints are configured in WATI's dashboard.</p>
       <p>This relay server receives events from WATI and displays them live below.</p>
+      <div id="watiInfoMessage" style="margin-top: 16px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Register WATI webhook endpoint</h2>
+      <div class="row">
+        <div>
+          <label for="phoneNumber">Phone number</label>
+          <input id="phoneNumber" placeholder="1650-937-9611" />
+        </div>
+        <div>
+          <label for="status">Status</label>
+          <select id="status">
+            <option value="0">0 - Enabled</option>
+            <option value="1">1 - Disabled</option>
+            <option value="2">2 - Defective</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <div>
+          <label for="watiUrl">Webhook destination URL</label>
+          <input id="watiUrl" placeholder="https://api.gaffarindia.in/webhooks/wati" />
+        </div>
+        <div>
+          <label for="eventTypes">Event types</label>
+          <input id="eventTypes" placeholder="message,newContactMessageReceived" />
+        </div>
+      </div>
+      <div style="margin-top: 12px;">
+        <button id="registerWebhook">Register webhook in WATI</button>
+      </div>
       <div id="watiStatusMessage" style="margin-top: 16px;"></div>
     </div>
 
@@ -53,6 +94,7 @@
             <th>Source</th>
             <th>IP</th>
             <th>Event Type</th>
+            <th>Forward</th>
           </tr>
         </thead>
         <tbody id="eventsTable"></tbody>
@@ -68,11 +110,19 @@
   <script>
     const eventsTable = document.getElementById('eventsTable');
     const selectedDetails = document.getElementById('selectedDetails');
-    const forwardUrlInput = document.getElementById('forwardUrl');
-    const saveButton = document.getElementById('saveForward');
     const statusMessage = document.getElementById('statusMessage');
-    const adminSecretInput = document.getElementById('adminSecret');
+    const phoneInput = document.getElementById('phoneNumber');
+    const statusInput = document.getElementById('status');
+    const watiUrlInput = document.getElementById('watiUrl');
+    const eventTypesInput = document.getElementById('eventTypes');
+    const registerButton = document.getElementById('registerWebhook');
     const watiStatusMessage = document.getElementById('watiStatusMessage');
+    const adminSecretPanel = document.getElementById('adminSecretPanel');
+    const adminSecretInput = document.getElementById('adminSecret');
+    const applyAdminSecretButton = document.getElementById('applyAdminSecret');
+    let eventStream = null;
+    let hasAdminSecret = false;
+    let selectedEventId = null;
 
     function displayMessage(text, isError = false) {
       statusMessage.textContent = text;
@@ -93,63 +143,204 @@
       return headers;
     }
 
-    function displayWatiMessage(text, isError = false) {
-      watiStatusMessage.textContent = text;
-      watiStatusMessage.style.color = isError ? '#b91c1c' : '#0f766e';
+    function getAdminSecretQuery(path) {
+      const url = new URL(path, window.location.origin);
+      const secret = adminSecretInput.value.trim();
+      if (secret) {
+        url.searchParams.set('secret', secret);
+      }
+      return `${url.pathname}${url.search}`;
+    }
+
+    function setStoredAdminSecret() {
+      const secret = adminSecretInput.value.trim();
+      if (secret) {
+        localStorage.setItem('webhookAdminSecret', secret);
+      } else {
+        localStorage.removeItem('webhookAdminSecret');
+      }
+    }
+
+    function appendCell(row, text) {
+      const cell = document.createElement('td');
+      cell.textContent = text || '';
+      row.appendChild(cell);
+    }
+
+    function getForwardBadge(status) {
+      const badge = document.createElement('span');
+      const normalized = status || 'disabled';
+      badge.textContent = normalized;
+      badge.className = `badge ${normalized === 'sent' ? 'success' : normalized === 'failed' ? 'error' : 'pending'}`;
+      return badge;
+    }
+
+    function getEventType(event) {
+      const headers = event.headers || {};
+      return event.eventType || headers['x-wati-event'] || headers['x-wc-webhook-topic'] || headers['x-wc-webhook-event'] || 'Raw';
+    }
+
+    function findEventRow(eventId) {
+      return Array.from(eventsTable.children).find((row) => row.dataset.eventId === eventId);
     }
 
     function renderEvent(event) {
       const tr = document.createElement('tr');
+      tr.dataset.eventId = event.id;
       const timestamp = new Date(event.receivedAt).toLocaleString();
       const source = event.source || 'unknown';
       const sourceIp = event.sourceIp || '';
-      const eventType = event.headers['x-wati-event'] || (typeof event.body === 'object' ? 'JSON' : 'Raw');
+      const eventType = getEventType(event);
+      const forwardStatus = event.forward ? event.forward.status : 'disabled';
 
-      tr.innerHTML = `
-        <td>${timestamp}</td>
-        <td>${source}</td>
-        <td>${sourceIp}</td>
-        <td>${eventType}</td>
-      `;
+      appendCell(tr, timestamp);
+      appendCell(tr, source);
+      appendCell(tr, sourceIp);
+      appendCell(tr, eventType);
+
+      const forwardCell = document.createElement('td');
+      forwardCell.appendChild(getForwardBadge(forwardStatus));
+      tr.appendChild(forwardCell);
+
       tr.addEventListener('click', () => {
+        selectedEventId = event.id;
         selectedDetails.textContent = JSON.stringify(event, null, 2);
       });
       return tr;
     }
 
+    function upsertEvent(event) {
+      const existingRow = findEventRow(event.id);
+      const row = renderEvent(event);
+
+      if (existingRow) {
+        eventsTable.replaceChild(row, existingRow);
+      } else {
+        eventsTable.prepend(row);
+      }
+
+      while (eventsTable.children.length > 40) {
+        eventsTable.removeChild(eventsTable.lastChild);
+      }
+
+      if (!selectedEventId || selectedEventId === event.id) {
+        selectedEventId = event.id;
+        selectedDetails.textContent = JSON.stringify(event, null, 2);
+      }
+    }
+
     async function loadConfig() {
       const response = await fetch('/api/config');
       const config = await response.json();
-      // No forward URL to load
+      hasAdminSecret = Boolean(config.hasAdminSecret);
+
+      if (hasAdminSecret) {
+        adminSecretPanel.style.display = 'flex';
+        adminSecretInput.value = localStorage.getItem('webhookAdminSecret') || '';
+      }
     }
 
     async function loadEvents() {
-      const response = await fetch('/api/events?limit=40');
+      if (hasAdminSecret && !adminSecretInput.value.trim()) {
+        displayMessage('Enter the admin secret to load events.', true);
+        return false;
+      }
+
+      const response = await fetch('/api/events?limit=40', {
+        headers: getAdminHeaders()
+      });
+
+      if (response.status === 401) {
+        displayMessage('Invalid admin secret.', true);
+        return false;
+      }
+
       const json = await response.json();
       eventsTable.innerHTML = '';
+      selectedEventId = null;
       json.events.forEach((event) => eventsTable.appendChild(renderEvent(event)));
       if (json.events.length > 0) {
+        selectedEventId = json.events[0].id;
         selectedDetails.textContent = JSON.stringify(json.events[0], null, 2);
+      }
+      displayMessage('Events loaded.');
+      return true;
+    }
+
+    async function registerWatiWebhook() {
+      const phoneNumber = phoneInput.value.trim();
+      const status = statusInput.value;
+      const watiUrl = watiUrlInput.value.trim();
+      const eventTypes = eventTypesInput.value.trim();
+
+      if (!phoneNumber || !watiUrl || !eventTypes) {
+        displayWatiMessage('Please fill in all required fields.', true);
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/wati/register', {
+          method: 'POST',
+          headers: getAdminHeaders(),
+          body: JSON.stringify({
+            phoneNumber,
+            status: parseInt(status),
+            watiUrl,
+            eventTypes: eventTypes.split(',')
+          })
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          displayWatiMessage('Webhook registered successfully!');
+        } else {
+          const error = await response.text();
+          displayWatiMessage(`Registration failed: ${error}`, true);
+        }
+      } catch (error) {
+        displayWatiMessage(`Registration failed: ${error.message}`, true);
       }
     }
 
     async function initialize() {
       await loadConfig();
-      await loadEvents();
-      const source = new EventSource('/events/stream');
-      source.onmessage = (event) => {
+      const loaded = await loadEvents();
+      if (loaded) {
+        connectEventStream();
+      }
+
+      registerButton.addEventListener('click', registerWatiWebhook);
+      applyAdminSecretButton.addEventListener('click', reloadWithAdminSecret);
+      adminSecretInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          reloadWithAdminSecret();
+        }
+      });
+    }
+
+    async function reloadWithAdminSecret() {
+      setStoredAdminSecret();
+      const loaded = await loadEvents();
+      if (loaded) {
+        connectEventStream();
+      }
+    }
+
+    function connectEventStream() {
+      if (eventStream) {
+        eventStream.close();
+      }
+
+      eventStream = new EventSource(getAdminSecretQuery('/events/stream'));
+      eventStream.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          const row = renderEvent(data);
-          eventsTable.prepend(row);
-          while (eventsTable.children.length > 40) {
-            eventsTable.removeChild(eventsTable.lastChild);
-          }
+          upsertEvent(data.event || data);
         } catch (error) {
           console.warn('Unable to parse stream event', error);
         }
       };
-      source.onerror = () => {
+      eventStream.onerror = () => {
         displayMessage('Realtime connection lost. Refresh to restore.', true);
       };
     }

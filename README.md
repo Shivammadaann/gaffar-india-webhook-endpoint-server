@@ -8,6 +8,8 @@ A lightweight Express webhook relay server that captures events from multiple so
 - Stores recent event history in memory and local persistence file `events.json`
 - `/admin` dashboard shows incoming events live from all sources
 - `/events/stream` provides server-sent events for live updates
+- Optional forwarding to a global URL or source-specific URLs
+- Optional source-specific webhook secrets, including WooCommerce HMAC signature checks
 
 ## Setup
 
@@ -25,13 +27,49 @@ cp .env.example .env
 
 3. Set `ADMIN_SECRET` to a strong secret for admin operations.
 
-4. Start the server:
+4. (Optional) Add WATI registration settings if you want to register webhooks via the admin panel:
+
+```text
+WATI_API_ENDPOINT=https://live-mt-server.wati.io
+WATI_API_TOKEN=your_wati_api_token_here
+```
+
+**Required WATI API scopes:**
+- `webhooks:create` (to register webhooks via API)
+
+5. (Optional) Configure forwarding:
+
+```text
+# Send every received event to this URL.
+WEBHOOK_FORWARD_URL=https://example.com/incoming-webhook-events
+
+# Or send only one source to a URL.
+WEBHOOK_FORWARD_WATI_URL=https://example.com/wati-events
+WEBHOOK_FORWARD_SHIPROCKET_URL=https://example.com/shiprocket-events
+WEBHOOK_FORWARD_WOOCOMMERCE_URL=https://example.com/woocommerce-events
+```
+
+By default, forwarded requests use a JSON event envelope with `source`, `headers`, `body`, `rawBody`, and timing metadata. Set `WEBHOOK_FORWARD_FORMAT=raw` to relay the original webhook body instead.
+
+6. (Optional) Configure receiver secrets:
+
+```text
+WEBHOOK_SECRET_WATI=your_wati_webhook_secret
+WEBHOOK_SECRET_SHIPROCKET=your_shiprocket_webhook_secret
+WEBHOOK_SECRET_WOOCOMMERCE=your_woocommerce_webhook_secret
+```
+
+For WATI and Shiprocket, pass the secret as `?secret=...`, `?webhook_secret=...`, `X-Webhook-Secret`, or `Authorization: Bearer ...`.
+
+For WooCommerce, set the same value as the webhook secret in WooCommerce. The server validates the `X-WC-Webhook-Signature` HMAC header when it is present.
+
+7. Start the server:
 
 ```bash
 npm start
 ```
 
-5. Open the admin UI:
+8. Open the admin UI:
 
 ```text
 http://localhost:3000/admin
@@ -51,16 +89,13 @@ Examples:
 - `https://api.gaffarindia.in/webhooks/meta`
 - `https://api.gaffarindia.in/webhooks/wati`
 
-```text
-http://localhost:3000/admin
-```
+## WATI webhook registration
 
-## WATI webhook status
+If you want to register webhook endpoints directly from the admin panel:
 
-The admin UI shows incoming events live. Webhook configuration is managed in WATI's dashboard.
-
-- Configure webhooks in WATI's UI with your relay URL: `https://api.gaffarindia.in/webhooks/wati`
-- The admin panel displays received events in real-time
+- Configure `WATI_API_ENDPOINT` and `WATI_API_TOKEN` in your `.env`
+- Open `/admin` and use the registration form
+- The server forwards requests to `POST /api/v2/webhookEndpoints`
 
 ## Deployment
 
@@ -84,4 +119,6 @@ This repo includes a `render.yaml` file so Render can deploy it as a Node web se
 ## Notes
 
 - The dashboard is intentionally simple and runs in the same service.
+- If `ADMIN_SECRET` is configured, `/api/events` and `/events/stream` require that secret.
 - The event store persists to `events.json` for restart resiliency.
+- Local file storage is suitable for a small single-instance service. Use a database or queue for high-volume production traffic.

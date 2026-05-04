@@ -1,5 +1,5 @@
 const path = require('path');
-const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
@@ -14,6 +14,11 @@ const EVENTS_MAX = parseInt(process.env.EVENTS_MAX, 10) || 500;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'dev';
 const WATI_API_ENDPOINT = (process.env.WATI_API_ENDPOINT || 'https://api.wati.io').replace(/\/+$/, '');
 const WATI_API_TOKEN = process.env.WATI_API_TOKEN || '';
+const BODY_LIMIT = process.env.BODY_LIMIT || '10mb';
+const WEBHOOK_FORWARD_URL = (process.env.WEBHOOK_FORWARD_URL || '').trim();
+const WEBHOOK_FORWARD_MAP = parseForwardMap(process.env.WEBHOOK_FORWARD_MAP || '');
+const WEBHOOK_FORWARD_FORMAT = (process.env.WEBHOOK_FORWARD_FORMAT || 'event').toLowerCase() === 'raw' ? 'raw' : 'event';
+const WEBHOOK_FORWARD_TIMEOUT_MS = parseInt(process.env.WEBHOOK_FORWARD_TIMEOUT_MS, 10) || 10000;
 
 const app = express();
 const eventHistory = loadEvents(EVENTS_MAX);
@@ -25,71 +30,284 @@ function addEvent(event) {
     eventHistory.shift();
   }
   saveEvents(eventHistory);
-  publishEvent(event);
+  publishEvent('created', event);
 }
 
-function publishEvent(event) {
-  const payload = `data: ${JSON.stringify(event)}\n\n`;
+function updateEvent(eventId, patch) {
+  const index = eventHistory.findIndex((item) => item.id === eventId);
+  if (index === -1) return;
+
+  eventHistory[index] = {
+    ...eventHistory[index],
+    ...patch,
+  };
+
+  saveEvents(eventHistory);
+  publishEvent('updated', eventHistory[index]);
+}
+
+function publishEvent(action, event) {
+  const payload = `data: ${JSON.stringify({ action, event })}\n\n`;
   for (const res of sseClients) {
     res.write(payload);
   }
 }
 
-function parseRawBody(req, res, next) {
-  let data = '';
-  req.setEncoding('utf8');
-  req.on('data', (chunk) => {
-    data += chunk;
-  });
-  req.on('end', () => {
-    req.rawBody = data || '';
-    next();
-  });
+function parseForwardMap(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return Object.entries(parsed).reduce((map, [source, urls]) => {
+        map[normalizeSource(source)] = urls;
+        return map;
+      }, {});
+    }
+  } catch (error) {
+    // Fall back to comma-separated source=url pairs.
+  }
+
+  return raw.split(',').reduce((map, pair) => {
+    const separator = pair.indexOf('=');
+    if (separator === -1) return map;
+
+    const source = normalizeSource(pair.slice(0, separator));
+    const url = pair.slice(separator + 1).trim();
+    if (source && url) {
+      map[source] = url;
+    }
+    return map;
+  }, {});
+}
+
+function normalizeSource(source) {
+  return String(source || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-');
+}
+
+function sourceEnvName(source) {
+  return normalizeSource(source).replace(/[^a-z0-9]/g, '_').toUpperCase();
+}
+
+function appendUrls(targets, value) {
+  if (!value) return;
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => appendUrls(targets, item));
+    return;
+  }
+
+  String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => targets.push(item));
+}
+
+function getForwardTargets(source) {
+  const targets = [];
+  const sourceKey = normalizeSource(source);
+  const envKey = `WEBHOOK_FORWARD_${sourceEnvName(source)}_URL`;
+
+  appendUrls(targets, process.env[envKey]);
+  appendUrls(targets, WEBHOOK_FORWARD_MAP[sourceKey]);
+  appendUrls(targets, WEBHOOK_FORWARD_URL);
+
+  return [...new Set(targets)];
+}
+
+function sanitizeHeaders(headers) {
+  const redactedPattern = /(authorization|cookie|secret|token|api-key)/i;
+
+  return Object.entries(headers).reduce((safeHeaders, [name, value]) => {
+    safeHeaders[name] = redactedPattern.test(name) ? '[redacted]' : value;
+    return safeHeaders;
+  }, {});
+}
+
+function parseWebhookBody(rawBody, contentType) {
+  const type = String(contentType || '').split(';')[0].trim().toLowerCase();
+  const trimmed = rawBody.trim();
+
+  if (!rawBody) {
+    return { body: {}, parseError: null };
+  }
+
+  if (type.includes('json') || /^[\[{]/.test(trimmed)) {
+    try {
+      return { body: JSON.parse(rawBody), parseError: null };
+    } catch (error) {
+      return { body: rawBody, parseError: error.message };
+    }
+  }
+
+  if (type === 'application/x-www-form-urlencoded') {
+    const params = new URLSearchParams(rawBody);
+    const body = {};
+
+    for (const [key, value] of params.entries()) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        body[key] = Array.isArray(body[key]) ? [...body[key], value] : [body[key], value];
+      } else {
+        body[key] = value;
+      }
+    }
+
+    return { body, parseError: null };
+  }
+
+  return { body: rawBody, parseError: null };
+}
+
+function detectEventType(headers, body) {
+  if (headers['x-wati-event']) return headers['x-wati-event'];
+  if (headers['x-wc-webhook-topic']) return headers['x-wc-webhook-topic'];
+  if (headers['x-wc-webhook-event']) return headers['x-wc-webhook-event'];
+  if (headers['x-shiprocket-event']) return headers['x-shiprocket-event'];
+
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    return body.eventType || body.event_type || body.topic || body.action || body.type || 'JSON';
+  }
+
+  return 'Raw';
+}
+
+function secureEquals(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getWebhookSecret(source) {
+  const envName = sourceEnvName(source);
+
+  return (
+    process.env[`WEBHOOK_SECRET_${envName}`] ||
+    process.env[`${envName}_WEBHOOK_SECRET`] ||
+    process.env.WEBHOOK_SHARED_SECRET ||
+    ''
+  );
+}
+
+function getPresentedWebhookSecret(req) {
+  const authorization = req.headers.authorization || '';
+  const bearerPrefix = 'Bearer ';
+
+  if (authorization.startsWith(bearerPrefix)) {
+    return authorization.slice(bearerPrefix.length).trim();
+  }
+
+  return (
+    req.headers['x-webhook-secret'] ||
+    req.headers['x-wati-secret'] ||
+    req.headers['x-shiprocket-secret'] ||
+    req.query.webhook_secret ||
+    req.query.secret ||
+    ''
+  );
+}
+
+function verifyWebhookRequest(req, rawBodyBuffer) {
+  const source = normalizeSource(req.params.source);
+  const secret = getWebhookSecret(source);
+
+  if (!secret) {
+    return { ok: true };
+  }
+
+  const wooCommerceSignature = req.headers['x-wc-webhook-signature'];
+  if (source === 'woocommerce' || wooCommerceSignature) {
+    if (wooCommerceSignature) {
+      const digest = crypto
+        .createHmac('sha256', secret)
+        .update(rawBodyBuffer)
+        .digest('base64');
+
+      return secureEquals(wooCommerceSignature, digest)
+        ? { ok: true }
+        : { ok: false, error: 'Invalid WooCommerce webhook signature' };
+    }
+  }
+
+  const presentedSecret = getPresentedWebhookSecret(req);
+  return presentedSecret && secureEquals(presentedSecret, secret)
+    ? { ok: true }
+    : { ok: false, error: 'Missing or invalid webhook secret' };
+}
+
+function buildForwardRequest(event) {
+  if (WEBHOOK_FORWARD_FORMAT === 'raw') {
+    return {
+      contentType: event.contentType || 'application/octet-stream',
+      body: event.rawBody || JSON.stringify(event.body || {}),
+    };
+  }
+
+  const { forward, ...eventPayload } = event;
+  return {
+    contentType: 'application/json',
+    body: JSON.stringify(eventPayload),
+  };
 }
 
 async function sendForward(targetUrl, event) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WEBHOOK_FORWARD_TIMEOUT_MS);
+
   try {
-    const payload = event.rawBody || JSON.stringify(event.body);
+    const payload = buildForwardRequest(event);
     const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': event.contentType || 'application/json',
+        'Content-Type': payload.contentType,
         'X-Webhook-Source': event.source,
         'X-Event-Id': event.id,
         'X-Event-Time': event.receivedAt,
       },
-      body: payload,
+      body: payload.body,
+      signal: controller.signal,
     });
 
     const text = await response.text();
     return {
-      forwarded: true,
-      forwardResponse: {
-        status: response.status,
-        statusText: response.statusText,
-        body: text.slice(0, 500),
-      },
+      targetUrl,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      body: text.slice(0, 500),
     };
   } catch (error) {
     return {
-      forwarded: false,
-      forwardResponse: {
-        error: error.message,
-      },
+      targetUrl,
+      ok: false,
+      error: error.name === 'AbortError' ? `Forward request timed out after ${WEBHOOK_FORWARD_TIMEOUT_MS}ms` : error.message,
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-const maybeFetch = global.fetch || (async (...args) => {
-  const nodeFetch = require('node-fetch');
-  return nodeFetch(...args);
-});
+async function forwardEvent(event, targets) {
+  const results = await Promise.all(targets.map((targetUrl) => sendForward(targetUrl, event)));
+  const ok = results.every((result) => result.ok);
+
+  updateEvent(event.id, {
+    forward: {
+      status: ok ? 'sent' : 'failed',
+      completedAt: new Date().toISOString(),
+      results,
+    },
+  });
+}
 
 app.use(morgan(LOG_LEVEL));
 app.use(cors());
-app.use(parseRawBody);
-app.use(express.json({ limit: '10mb', strict: false }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 function makeId() {
@@ -102,51 +320,81 @@ function isAdminAuthorized(req) {
   return token === ADMIN_SECRET;
 }
 
-app.post('/webhooks/:source', async (req, res) => {
+app.post('/webhooks/:source', express.raw({ type: '*/*', limit: BODY_LIMIT }), async (req, res) => {
   const receivedAt = new Date().toISOString();
-  const source = req.params.source;
+  const source = normalizeSource(req.params.source);
   const sourceIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
   const contentType = req.headers['content-type'] || '';
-  let body = req.body;
+  const rawBodyBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+  const rawBody = rawBodyBuffer.toString('utf8');
+  const verification = verifyWebhookRequest(req, rawBodyBuffer);
 
-  if ((body === undefined || body === null || body === '') && req.rawBody) {
-    try {
-      body = JSON.parse(req.rawBody);
-    } catch (error) {
-      body = req.rawBody;
-    }
+  if (!verification.ok) {
+    return res.status(401).json({ success: false, error: verification.error });
   }
 
+  const parsed = parseWebhookBody(rawBody, contentType);
+  const headers = sanitizeHeaders(req.headers);
+  const forwardTargets = getForwardTargets(source);
   const event = {
     id: makeId(),
     receivedAt,
     source,
     sourceIp,
     contentType,
-    headers: {
-      'x-wati-event': req.headers['x-wati-event'] || null,
-      'user-agent': req.headers['user-agent'] || null,
-      'x-forwarded-for': req.headers['x-forwarded-for'] || null,
+    eventType: detectEventType(req.headers, parsed.body),
+    headers,
+    body: parsed.body,
+    rawBody,
+    parseError: parsed.parseError,
+    forward: {
+      status: forwardTargets.length > 0 ? 'pending' : 'disabled',
+      targets: forwardTargets,
     },
-    body,
-    rawBody: req.rawBody,
   };
 
   addEvent(event);
 
-  res.json({ success: true, eventId: event.id, source });
+  if (forwardTargets.length > 0) {
+    forwardEvent(event, forwardTargets).catch((error) => {
+      updateEvent(event.id, {
+        forward: {
+          status: 'failed',
+          completedAt: new Date().toISOString(),
+          results: [{ ok: false, error: error.message }],
+        },
+      });
+    });
+  }
+
+  return res.json({
+    success: true,
+    eventId: event.id,
+    source,
+    forwardStatus: event.forward.status,
+  });
 });
 
+app.use(express.json({ limit: BODY_LIMIT, strict: false }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
+
 app.get('/api/events', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   const limit = parseInt(req.query.limit, 10) || EVENTS_MAX;
   const items = eventHistory.slice(-limit).reverse();
-  res.json({ events: items });
+  return res.json({ events: items });
 });
 
 app.get('/api/config', (req, res) => {
   res.json({
     hasAdminSecret: Boolean(ADMIN_SECRET),
     eventsMax: EVENTS_MAX,
+    forwardFormat: WEBHOOK_FORWARD_FORMAT,
+    hasGlobalForwardTarget: Boolean(WEBHOOK_FORWARD_URL),
+    forwardSources: Object.keys(WEBHOOK_FORWARD_MAP),
   });
 });
 
@@ -159,16 +407,33 @@ app.post('/api/wati/register', async (req, res) => {
     return res.status(500).json({ error: 'WATI_API_TOKEN is not configured' });
   }
 
-  const webhooks = Array.isArray(req.body) ? req.body : req.body.webhooks;
-  if (!Array.isArray(webhooks) || webhooks.length === 0) {
-    return res.status(400).json({ error: 'Request body must be an array of webhook endpoint objects' });
+  const requestBody = req.body || {};
+
+  // Handle both single webhook object and array of webhooks.
+  let webhooks = [];
+  if (Array.isArray(requestBody)) {
+    webhooks = requestBody;
+  } else if (requestBody.phoneNumber && requestBody.watiUrl) {
+    // Single webhook object from UI
+    webhooks = [{
+      phoneNumber: requestBody.phoneNumber,
+      status: requestBody.status,
+      url: requestBody.watiUrl,
+      eventTypes: requestBody.eventTypes
+    }];
+  } else if (requestBody.webhooks && Array.isArray(requestBody.webhooks)) {
+    webhooks = requestBody.webhooks;
+  } else {
+    return res.status(400).json({ error: 'Invalid request body. Expected single webhook object or array of webhooks' });
   }
 
   const payload = webhooks.map((item) => ({
     phoneNumber: item.phoneNumber,
     status: Number(item.status),
     url: item.url,
-    eventTypes: Array.isArray(item.eventTypes) ? item.eventTypes : [],
+    eventTypes: Array.isArray(item.eventTypes)
+      ? item.eventTypes.map((eventType) => String(eventType).trim()).filter(Boolean)
+      : String(item.eventTypes || '').split(',').map((eventType) => eventType.trim()).filter(Boolean),
   }));
 
   try {
@@ -193,6 +458,10 @@ app.post('/api/wati/register', async (req, res) => {
 });
 
 app.get('/events/stream', (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -213,6 +482,14 @@ app.get('/admin', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', eventsStored: eventHistory.length });
+});
+
+app.use((error, req, res, next) => {
+  if (error && error.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  return next(error);
 });
 
 app.use((req, res) => {
