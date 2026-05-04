@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wati-incoming-webhook
+    env: node
+    branch: main
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: WATI_API_ENDPOINT
+        value: https://api.wati.io
