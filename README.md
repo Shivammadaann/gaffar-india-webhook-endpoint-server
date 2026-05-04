@@ -35,6 +35,9 @@ WATI_API_ENDPOINT=https://api.wati.io
 WATI_API_TOKEN=your_wati_api_token_here
 ```
 
+**Required WATI API scopes:**
+- `webhooks:create` (if you want to register webhooks via API)
+
 5. Set `ADMIN_SECRET` to a strong secret for admin operations.
    - Enter the same value into the `Admin Secret` field in `/admin` before saving the forward URL or registering WATI webhook endpoints.
 
@@ -52,11 +55,10 @@ http://localhost:3000/admin
 
 ## WATI webhook status
 
-The admin UI displays the current webhook endpoints configured in WATI.
+The admin UI shows incoming events live. Webhook configuration is managed in WATI's dashboard.
 
-- Configure `WATI_API_ENDPOINT` and `WATI_API_TOKEN`.
-- Open `/admin` and enter the admin secret to view webhook status.
-- The table shows phone numbers, status, subscribed event types, and destination URLs.
+- Configure webhooks in WATI's UI with your relay URL: `https://watiwebhooks.gaffarindia.in/webhook`
+- The admin panel displays received events in real-time
 
 ## Deployment
 

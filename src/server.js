@@ -217,35 +217,6 @@ app.post('/api/wati/register', async (req, res) => {
   }
 });
 
-app.get('/api/wati/webhooks', async (req, res) => {
-  if (!isAdminAuthorized(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  if (!WATI_API_TOKEN) {
-    return res.status(500).json({ error: 'WATI_API_TOKEN is not configured' });
-  }
-
-  try {
-    const response = await fetch(`${WATI_API_ENDPOINT}/api/v2/webhookEndpoints`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${WATI_API_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return res.status(response.status).json({ error: 'Failed to fetch WATI webhooks', details: data });
-    }
-
-    return res.json(data);
-  } catch (error) {
-    return res.status(502).json({ error: 'Failed to reach WATI API', details: error.message });
-  }
-});
-
 app.get('/events/stream', (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',

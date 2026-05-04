@@ -55,10 +55,8 @@
 
     <div class="card">
       <h2>WATI Webhook Status</h2>
-      <p>Configured webhook endpoints from WATI:</p>
-      <div id="watiWebhooksContainer">
-        <p>Loading webhook status...</p>
-      </div>
+      <p>Webhook endpoints are configured in WATI's dashboard.</p>
+      <p>This relay server receives events from WATI and displays them live below.</p>
       <div id="watiStatusMessage" style="margin-top: 16px;"></div>
     </div>
 
@@ -90,7 +88,6 @@
     const saveButton = document.getElementById('saveForward');
     const statusMessage = document.getElementById('statusMessage');
     const adminSecretInput = document.getElementById('adminSecret');
-    const watiWebhooksContainer = document.getElementById('watiWebhooksContainer');
     const watiStatusMessage = document.getElementById('watiStatusMessage');
 
     function displayMessage(text, isError = false) {
@@ -167,59 +164,11 @@
       displayMessage('Forward URL saved successfully.');
     }
 
-    async function loadWatiWebhooks() {
-      try {
-        const response = await fetch('/api/wati/webhooks', {
-          headers: getAdminHeaders(),
-        });
-
-        if (!response.ok) {
-          const errorBody = await response.json().catch(() => ({}));
-          displayWatiMessage(errorBody.error || 'Failed to load WATI webhooks.', true);
-          watiWebhooksContainer.innerHTML = '<p>Unable to load webhook status.</p>';
-          return;
-        }
-
-        const data = await response.json();
-        if (!data.ok || !Array.isArray(data.result)) {
-          displayWatiMessage('Invalid response from WATI API.', true);
-          watiWebhooksContainer.innerHTML = '<p>No webhook data available.</p>';
-          return;
-        }
-
-        const webhooks = data.result;
-        if (webhooks.length === 0) {
-          watiWebhooksContainer.innerHTML = '<p>No webhook endpoints configured in WATI.</p>';
-          displayWatiMessage('No webhooks found.', false);
-          return;
-        }
-
-        let html = '<table><thead><tr><th>Phone Number</th><th>Status</th><th>Event Types</th><th>URL</th></tr></thead><tbody>';
-        webhooks.forEach((webhook) => {
-          const statusText = webhook.status === 0 ? 'Enabled' : webhook.status === 1 ? 'Disabled' : 'Defective';
-          const statusClass = webhook.status === 0 ? 'success' : 'error';
-          html += `<tr>
-            <td>${webhook.channelPhoneNumber || webhook.phoneNumber}</td>
-            <td><span class="badge ${statusClass}">${statusText}</span></td>
-            <td>${webhook.eventTypes.join(', ')}</td>
-            <td>${webhook.url}</td>
-          </tr>`;
-        });
-        html += '</tbody></table>';
-        watiWebhooksContainer.innerHTML = html;
-        displayWatiMessage(`Loaded ${webhooks.length} webhook endpoint(s).`, false);
-      } catch (error) {
-        displayWatiMessage('Error loading WATI webhooks: ' + error.message, true);
-        watiWebhooksContainer.innerHTML = '<p>Error loading webhook status.</p>';
-      }
-    }
-
     saveButton.addEventListener('click', saveForwardUrl);
 
     async function initialize() {
       await loadConfig();
       await loadEvents();
-      await loadWatiWebhooks();
       const source = new EventSource('/events/stream');
       source.onmessage = (event) => {
         try {
