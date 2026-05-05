@@ -166,13 +166,23 @@ function parseWebhookBody(rawBody, contentType) {
   return { body: rawBody, parseError: null };
 }
 
-function detectEventType(headers, body) {
+function detectEventType(headers, body, source = '') {
   if (headers['x-wati-event']) return headers['x-wati-event'];
   if (headers['x-wc-webhook-topic']) return headers['x-wc-webhook-topic'];
   if (headers['x-wc-webhook-event']) return headers['x-wc-webhook-event'];
   if (headers['x-shiprocket-event']) return headers['x-shiprocket-event'];
 
   if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const normalizedSource = normalizeSource(source);
+    const watiMessageText = body.text
+      || body.message
+      || (body.data && (body.data.text || body.data.message))
+      || (body.message && typeof body.message === 'object' && (body.message.text || body.message.body));
+
+    if (normalizedSource === 'wati' && watiMessageText) {
+      return body.eventType || body.event_type || body.type || 'message';
+    }
+
     return body.eventType || body.event_type || body.topic || body.action || body.type || 'JSON';
   }
 
@@ -545,7 +555,7 @@ async function handleIncomingWebhook(req, res) {
     source,
     sourceIp,
     contentType,
-    eventType: detectEventType(req.headers, parsed.body),
+    eventType: detectEventType(req.headers, parsed.body, source),
     headers,
     body: parsed.body,
     rawBody,

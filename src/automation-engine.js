@@ -38,6 +38,10 @@ function stringifyValue(value) {
   return String(value);
 }
 
+function uniqueList(values) {
+  return [...new Set(values.map((value) => stringifyValue(value).trim()).filter(Boolean))];
+}
+
 function normalizePhone(value, defaultCountryCode) {
   const digits = stringifyValue(value).replace(/\D/g, '');
   if (!digits) return '';
@@ -130,6 +134,45 @@ function conditionMatches(condition, event) {
   return candidates.some((path) => matchesTextOperator(getByPath(event, path), operator, condition.value));
 }
 
+function eventTypeCandidates(event) {
+  const body = event && event.body && typeof event.body === 'object' && !Array.isArray(event.body) ? event.body : {};
+  const headers = event && event.headers && typeof event.headers === 'object' ? event.headers : {};
+  const candidates = uniqueList([
+    event && event.eventType,
+    event && event.type,
+    headers['x-wati-event'],
+    headers['x-wc-webhook-topic'],
+    headers['x-wc-webhook-event'],
+    headers['x-shiprocket-event'],
+    body.eventType,
+    body.event_type,
+    body.event,
+    body.topic,
+    body.action,
+    body.type,
+    getByPath(body, 'data.eventType'),
+    getByPath(body, 'data.event_type'),
+    getByPath(body, 'data.type'),
+    getByPath(body, 'message.type'),
+  ]);
+
+  const source = normalizeSource(event && event.source);
+  const hasMessageText = firstValue(event, [
+    'body.text',
+    'body.message',
+    'body.data.text',
+    'body.message.text',
+    'body.message.body',
+    'body.data.message',
+  ]);
+
+  if (source === 'wati' && hasMessageText !== undefined) {
+    candidates.push('message', 'newContactMessageReceived');
+  }
+
+  return uniqueList(candidates).map((type) => type.toLowerCase());
+}
+
 function ruleMatches(rule, event) {
   if (!rule.enabled) return false;
 
@@ -140,9 +183,9 @@ function ruleMatches(rule, event) {
 
   const eventTypes = Array.isArray(rule.eventTypes) ? rule.eventTypes.filter(Boolean) : [];
   if (eventTypes.length > 0) {
-    const actualType = stringifyValue(event.eventType).toLowerCase();
+    const actualTypes = eventTypeCandidates(event);
     const allowedTypes = eventTypes.map((type) => stringifyValue(type).toLowerCase());
-    if (!allowedTypes.includes(actualType)) {
+    if (!allowedTypes.some((type) => actualTypes.includes(type))) {
       return false;
     }
   }
