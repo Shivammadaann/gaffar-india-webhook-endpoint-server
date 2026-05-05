@@ -352,6 +352,7 @@ function getAutomationUrls(req) {
     woocommerce: `${baseUrl}/automations/woocommerce`,
     shipping: `${baseUrl}/automations/shipping`,
     wati: `${baseUrl}/automations/wati`,
+    abandonedcart: `${baseUrl}/webhook/abandonedcart`,
   };
 }
 
@@ -602,6 +603,7 @@ async function handleIncomingWebhook(req, res) {
   });
 }
 
+app.post('/webhook/:source', webhookBodyParser, handleIncomingWebhook);
 app.post('/webhooks/:source', webhookBodyParser, handleIncomingWebhook);
 app.post('/automations/:source', webhookBodyParser, handleIncomingWebhook);
 
@@ -658,6 +660,11 @@ app.get('/api/service-secrets', (req, res) => {
         label: 'WATI',
         secret: getWebhookSecret('wati'),
         envKey: 'WEBHOOK_SECRET_WATI',
+      },
+      abandonedcart: {
+        label: 'Abandoned Cart',
+        secret: getWebhookSecret('abandonedcart'),
+        envKey: 'WEBHOOK_SECRET_ABANDONEDCART',
       },
     },
   });
